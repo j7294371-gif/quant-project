@@ -1,0 +1,19 @@
+max_position_pct: 0.2        # 单币种最大仓位 20%
+max_drawdown_limit: 0.3      # 总账户回撤 30% 熔断
+daily_loss_limit: 0.05       # 单日亏损 5% 熔断
+circuit_cooldown_hours: 24   # 熔断后冷却时间（小时），0 = 允许手动立即重置
+position_method: "fixed_pct" # fixed_pct | kelly | risk_per_trade
+risk_per_trade_pct: 0.01     # 每笔风险 1%（risk_per_trade 模式）
+stop_loss:
+  type: "atr"                # fixed_pct | atr | trailing
+  fixed_pct: 0.05            # 固定 5% 止损
+  atr_multiplier: 2.0        # ATR 倍数止损
+  trailing_pct: 0.03         # 移动止损 3%
+take_profit:
+  type: "fixed_pct"          # fixed_pct | atr
+  fixed_pct: 0.10            # 固定 10% 止盈
+  atr_multiplier: 4.0
+portfolio:
+  lookback_days: 30          # 相关性回溯天数
+  correlation_high: 0.8      # 高相关阈值（触发仓位惩罚 → max/2）
+  correlation_extreme: 0.95  # 极高相关阈值（触发加重惩罚 → max/3）

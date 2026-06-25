@@ -1,0 +1,11 @@
+services:
+  quant:
+    build: .
+    env_file: .env              # 从宿主机 .env 读取 API Key（.dockerignore 确保不进镜像）
+    volumes:
+      - ./config:/app/config:ro  # 配置只读
+      - ./data:/app/data         # 数据缓存持久化
+      - ./logs:/app/logs         # 日志持久化
+      - ./state:/app/state       # 状态持久化
+    # 默认跑一次回测（可修改为 paper / live）
+    command: python3 main.py backtest --strategy sma_cross --symbol BTC/USDT --timeframe 1h --start 2024-01-01

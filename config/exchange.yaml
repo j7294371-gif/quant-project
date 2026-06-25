@@ -1,0 +1,6 @@
+exchange: "binance"          # CCXT exchange id
+testnet: true                # 模拟盘/测试用 testnet
+symbols:                     # 监控的币种列表
+  - "BTC/USDT"
+  - "ETH/USDT"
+timeframe: "1h"              # 默认 K 线周期

@@ -1,0 +1,15 @@
+active: "sma_cross"          # 当前启用的策略名
+sma_cross:
+  short_window: 5
+  long_window: 20
+macd:
+  fast: 12
+  slow: 26
+  signal: 9
+rsi:
+  period: 14
+  oversold: 30               # RSI < 30 超卖买入
+  overbought: 70             # RSI > 70 超买卖出
+bollinger:
+  period: 20
+  std_dev: 2.0               # 标准差倍数

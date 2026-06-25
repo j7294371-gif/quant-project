@@ -1,0 +1,7 @@
+log_level: "INFO"             # DEBUG | INFO | WARNING | ERROR
+log_dir: "./logs"             # 日志输出目录
+log_retention_days: 30        # 日志保留天数
+data_cache_dir: "./data"      # 历史数据缓存目录
+state_dir: "./state"          # 状态持久化目录
+analytics:
+  risk_free_rate: 0.02        # 无风险利率（用于 Sharpe/Sortino 计算，默认 2%）

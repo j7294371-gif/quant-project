@@ -1,0 +1,31 @@
+# 环境变量（含 API Key）
+.env
+.env.local
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+dist/
+
+# 运行时数据
+logs/
+data/
+state/
+
+# 测试覆盖率
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 系统文件
+.DS_Store
+Thumbs.db
+*.tmp

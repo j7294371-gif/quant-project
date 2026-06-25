@@ -1,0 +1,14 @@
+ccxt==4.2.10
+pandas==2.2.0
+numpy==1.26.3
+pydantic==2.5.0
+python-dotenv==1.0.0
+pyyaml==6.0.1
+loguru==0.7.2
+rich==13.7.0
+websocket-client==1.7.0
+plotly==5.18.0
+pytest==8.0.0
+pytest-cov==4.1.0
+pytest-timeout==2.2.0
+ruff==0.3.0
