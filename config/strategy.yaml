@@ -13,3 +13,22 @@ rsi:
 bollinger:
   period: 20
   std_dev: 2.0               # 标准差倍数
+fusion:
+  # 三层权重（必须加起来 = 1.0）
+  tech_weight: 0.40          # 技术面（SMA+MACD+RSI+Bollinger）
+  sentiment_weight: 0.30     # 情绪面（Fear & Greed 逆向指标）
+  funding_weight: 0.30       # 市场结构（资金费率 + 价格偏离度）
+  # 信号阈值
+  buy_threshold: 65          # 总分 >= 65 → BUY
+  sell_threshold: 35         # 总分 <= 35 → SELL
+  # 子策略参数
+  sma_short: 5
+  sma_long: 20
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  rsi_period: 14
+  rsi_oversold: 30
+  rsi_overbought: 70
+  bollinger_period: 20
+  bollinger_std_dev: 2.0

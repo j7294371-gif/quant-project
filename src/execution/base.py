@@ -94,7 +94,9 @@ class Position:
 
 class ExecutionEngine(ABC):
     @abstractmethod
-    def execute_signal(self, signal, equity: Decimal, position: Position | None) -> Order:
+    def execute_signal(self, signal, equity: Decimal, position: Position | None,
+                       quantity: Decimal | None = None) -> Order:
+        """Execute a trade signal. quantity=None means engine decides sizing."""
         ...
 
     @abstractmethod

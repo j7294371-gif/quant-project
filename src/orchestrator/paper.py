@@ -55,14 +55,14 @@ class PaperOrchestrator(BaseOrchestrator):
 
                     self._last_bar_timestamps[symbol] = int(ohlcv.iloc[-1]["timestamp"])
 
-                    # Accumulate data and process
-                    self._dataframes[symbol].append(ohlcv)
-                    # Keep last 500 bars
+                    # Accumulate data as dict rows (not DataFrames) for efficient concat
+                    row = ohlcv.iloc[0].to_dict()
+                    self._dataframes[symbol].append(row)
                     if len(self._dataframes[symbol]) > 500:
                         self._dataframes[symbol] = self._dataframes[symbol][-500:]
 
                     import pandas as pd
-                    df = pd.concat(self._dataframes[symbol], ignore_index=True)
+                    df = pd.DataFrame(self._dataframes[symbol])
 
                     self._process_paper_bar(symbol, df, peak_equity)
 
@@ -102,39 +102,48 @@ class PaperOrchestrator(BaseOrchestrator):
         return None
 
     def _process_paper_bar(self, symbol: str, df, peak_equity: Decimal):
-        """Process one bar: strategy -> risk -> execute."""
+        """Process one bar: strategy -> risk -> execute (with error handling)."""
         import pandas as pd
 
         signal = self._process_bar(symbol, df)
         if signal.action == SignalAction.HOLD:
             return
 
-        position = self.execution.get_current_position(symbol)
-        equity = self.execution.get_equity()
+        try:
+            position = self.execution.get_current_position(symbol)
+            equity = self.execution.get_equity()
 
-        # SELL signals bypass risk checks
-        if signal.action == SignalAction.SELL:
-            order = self.execution.execute_signal(signal, equity, position)
-            self.trades.append(order)
-            return
-
-        # BUY signals: risk checks
-        if self.risk_manager:
-            if not self.risk_manager.check_signal(signal, equity, position):
+            # SELL signals bypass risk checks
+            if signal.action == SignalAction.SELL:
+                order = self.execution.execute_signal(signal, equity, position)
+                self.trades.append(order)
+                if position and order.filled_price:
+                    sell_val = float(order.filled_quantity) * float(order.filled_price)
+                    buy_val = float(position.quantity) * float(position.entry_price)
+                    pnl = Decimal(str(sell_val - buy_val - float(order.fee)))
+                    self.realized_pnl += pnl
                 return
 
-        order = self.execution.execute_signal(signal, equity, position)
-        self.trades.append(order)
+            # BUY signals: risk check + position sizing
+            if self.risk_manager:
+                if not self.risk_manager.check_signal(signal, equity, position):
+                    return
 
-        if self.risk_manager:
-            self.risk_manager.record_trade()
+                pos_size = self.risk_manager.calculate_position(signal, equity, None)
+                order = self.execution.execute_signal(
+                    signal, equity, position, quantity=pos_size.quantity,
+                )
+            else:
+                order = self.execution.execute_signal(signal, equity, position)
 
-        # Update peak equity
-        if order.side == "sell" and order.filled_price:
-            sell_val = float(order.filled_quantity) * float(order.filled_price)
-            buy_val = float(position.quantity) * float(position.entry_price) if position else 0
-            pnl = Decimal(str(sell_val - buy_val - float(order.fee)))
-            self.realized_pnl += pnl
+            self.trades.append(order)
+
+            if self.risk_manager:
+                self.risk_manager.record_trade()
+
+        except Exception as e:
+            self.logger.error(f"Error processing bar for {symbol}: {e}", exc_info=True)
+            self.warnings.append(f"Bar processing error: {e}")
 
     def shutdown(self):
         self._stop_event = True

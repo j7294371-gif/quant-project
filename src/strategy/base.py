@@ -21,6 +21,18 @@ class Signal:
     timestamp: int  # UTC ms
     reason: str
 
+    @staticmethod
+    def create_exit(symbol: str, price: Decimal, timestamp: int, reason: str) -> "Signal":
+        """Factory for forced-exit signals (SL/TP/circuit breaker)."""
+        return Signal(
+            action=SignalAction.SELL,
+            symbol=symbol,
+            strength=1.0,
+            price=price,
+            timestamp=timestamp,
+            reason=reason,
+        )
+
 
 class BaseStrategy(ABC):
     def __init__(self, params: dict):

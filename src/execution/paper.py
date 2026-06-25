@@ -6,11 +6,13 @@ Friction costs: 0.1% fee + 0.05% slippage.
 from decimal import Decimal
 from loguru import logger
 from src.execution.base import ExecutionEngine, Order, OrderStatus, OrderType, Position
+from src.strategy.base import Signal
 
 
 class PaperEngine(ExecutionEngine):
-    def __init__(self, state_store):
+    def __init__(self, state_store, initial_equity: Decimal = Decimal("10000")):
         self.state_store = state_store
+        self._initial_equity = Decimal(str(initial_equity))
         self._last_price: dict[str, Decimal] = {}
         self._trades: list[Order] = []
         self._realized_pnl: Decimal = Decimal("0")
@@ -23,29 +25,25 @@ class PaperEngine(ExecutionEngine):
     def realized_pnl(self) -> Decimal:
         return self._realized_pnl
 
-    def execute_signal(self, signal, equity: Decimal, position: Position | None) -> Order:
-        """Simulate fill at signal.price with slippage and fee."""
+    def execute_signal(self, signal, equity: Decimal, position: Position | None,
+                       quantity: Decimal | None = None) -> Order:
+        """Simulate fill at signal.price with slippage and fee. Uses quantity from RiskManager."""
         base_price = Decimal(str(signal.price))
 
         if signal.action.value == "buy":
-            execution_price = base_price * Decimal("1.0005")  # slippage
-            quantity = self._calc_quantity(equity, execution_price, position)
+            execution_price = base_price * Decimal("1.0005")
+            if quantity is None:
+                quantity = equity * Decimal("0.2") / execution_price
             filled_value = quantity * execution_price
             fee = filled_value * Decimal("0.001")
 
             order = Order(
-                id=Order.create_pending(signal.symbol, "buy", quantity, execution_price, signal.timestamp, signal.reason).id,
-                symbol=signal.symbol,
-                side="buy",
-                type=OrderType.MARKET,
-                quantity=quantity,
-                price=execution_price,
-                status=OrderStatus.FILLED,
-                filled_quantity=quantity,
-                filled_price=execution_price,
-                fee=fee,
-                timestamp=signal.timestamp,
-                reason=signal.reason,
+                id=Order.create_pending(signal.symbol, "buy", quantity, execution_price,
+                                        signal.timestamp, signal.reason).id,
+                symbol=signal.symbol, side="buy", type=OrderType.MARKET,
+                quantity=quantity, price=execution_price, status=OrderStatus.FILLED,
+                filled_quantity=quantity, filled_price=execution_price, fee=fee,
+                timestamp=signal.timestamp, reason=signal.reason,
             )
 
         elif signal.action.value == "sell":
@@ -59,40 +57,28 @@ class PaperEngine(ExecutionEngine):
                 self._realized_pnl += pnl
 
             order = Order(
-                id=Order.create_pending(signal.symbol, "sell", qty, execution_price, signal.timestamp, signal.reason).id,
-                symbol=signal.symbol,
-                side="sell",
-                type=OrderType.MARKET,
-                quantity=qty,
-                price=execution_price,
-                status=OrderStatus.FILLED,
-                filled_quantity=qty,
-                filled_price=execution_price,
-                fee=fee,
-                timestamp=signal.timestamp,
-                reason=signal.reason,
+                id=Order.create_pending(signal.symbol, "sell", qty, execution_price,
+                                        signal.timestamp, signal.reason).id,
+                symbol=signal.symbol, side="sell", type=OrderType.MARKET,
+                quantity=qty, price=execution_price, status=OrderStatus.FILLED,
+                filled_quantity=qty, filled_price=execution_price, fee=fee,
+                timestamp=signal.timestamp, reason=signal.reason,
             )
         else:
-            return Order.create_pending(signal.symbol, "hold", Decimal("0"), base_price, signal.timestamp, "hold")
+            return Order.create_pending(signal.symbol, "hold", Decimal("0"),
+                                        base_price, signal.timestamp, "hold")
 
         self._trades.append(order)
         self._last_price[signal.symbol] = base_price
         self._persist_position(order)
         return order
 
-    def _calc_quantity(self, equity: Decimal, price: Decimal, position: Position | None) -> Decimal:
-        if position is not None:
-            return Decimal("0")  # Already have position
-        return equity * Decimal("0.2") / price  # 20% of equity
-
     def _persist_position(self, order: Order):
         positions_data = self.state_store.load("positions") or {"positions": {}}
         if order.side == "buy" and order.status == OrderStatus.FILLED:
             positions_data["positions"][order.symbol] = {
-                "symbol": order.symbol,
-                "quantity": str(order.filled_quantity),
-                "entry_price": str(order.filled_price),
-                "timestamp": order.timestamp,
+                "symbol": order.symbol, "quantity": str(order.filled_quantity),
+                "entry_price": str(order.filled_price), "timestamp": order.timestamp,
             }
         elif order.side == "sell" and order.status == OrderStatus.FILLED:
             positions_data["positions"].pop(order.symbol, None)
@@ -103,29 +89,18 @@ class PaperEngine(ExecutionEngine):
         orders = []
         for symbol, pos in list(positions_data.get("positions", {}).items()):
             price = self._last_price.get(symbol, Decimal(str(pos["entry_price"])))
-
-            FakeSignal = type('FakeSignal', (), {})
-            FakeAction = type('FakeAction', (), {})
-            signal = FakeSignal()
-            signal.symbol = symbol
-            signal.action = FakeAction()
-            signal.action.value = 'sell'
-            signal.price = price
-            signal.timestamp = 0
-            signal.reason = reason
-
-            pos_obj = Position(
-                symbol=symbol,
-                quantity=Decimal(pos["quantity"]),
-                entry_price=Decimal(pos["entry_price"]),
-                timestamp=int(pos["timestamp"]),
+            signal = Signal.create_exit(
+                symbol=symbol, price=price, timestamp=0, reason=reason,
             )
-            order = self.execute_signal(signal, Decimal("0"), pos_obj)
-            orders.append(order)
+            pos_obj = Position(
+                symbol=symbol, quantity=Decimal(pos["quantity"]),
+                entry_price=Decimal(pos["entry_price"]), timestamp=int(pos["timestamp"]),
+            )
+            orders.append(self.execute_signal(signal, Decimal("0"), pos_obj))
         return orders
 
     def cancel_all_orders(self) -> list[Order]:
-        return []  # Paper mode has no pending orders
+        return []
 
     def get_current_position(self, symbol: str) -> Position | None:
         data = self.state_store.load("positions")
@@ -135,20 +110,16 @@ class PaperEngine(ExecutionEngine):
         if not pos:
             return None
         return Position(
-            symbol=pos["symbol"],
-            quantity=Decimal(pos["quantity"]),
-            entry_price=Decimal(pos["entry_price"]),
-            timestamp=int(pos["timestamp"]),
+            symbol=pos["symbol"], quantity=Decimal(pos["quantity"]),
+            entry_price=Decimal(pos["entry_price"]), timestamp=int(pos["timestamp"]),
         )
 
     def get_equity(self) -> Decimal:
-        """Calculate equity from state store."""
-        # Simplified: return cash estimate. In real paper mode this would track cash properly.
         positions_data = self.state_store.load("positions") or {"positions": {}}
-        total = Decimal("10000")  # Default initial
+        total = self._initial_equity
         for symbol, pos in positions_data.get("positions", {}).items():
             last = self._last_price.get(symbol, Decimal(pos["entry_price"]))
             qty = Decimal(pos["quantity"])
             entry = Decimal(pos["entry_price"])
-            total += qty * (last - entry)  # Unrealized PnL
+            total += qty * (last - entry)
         return total + self._realized_pnl

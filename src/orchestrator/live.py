@@ -29,7 +29,7 @@ class LiveOrchestrator(PaperOrchestrator):
         # Live mode: mandatory human confirmation
         print()
         print("=" * 60)
-        print("  ⚠️  LIVE TRADING MODE — 实盘交易模式")
+        print("  *** LIVE TRADING MODE — 实盘交易模式 ***")
         print("=" * 60)
         print(f"  Strategy:  {self.strategy.__class__.__name__}")
         print(f"  Symbols:   {', '.join(self.symbols)}")

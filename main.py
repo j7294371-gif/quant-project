@@ -21,6 +21,7 @@ import src.strategy.sma_cross  # noqa: F401
 import src.strategy.macd  # noqa: F401
 import src.strategy.rsi  # noqa: F401
 import src.strategy.bollinger  # noqa: F401
+import src.strategy.fusion  # noqa: F401
 
 
 def date_to_utc_ms(date_str: str) -> int:
@@ -88,7 +89,7 @@ def _build_execution(args, config, state_store):
     if args.command == "backtest":
         return BacktestEngine(initial_equity=Decimal(str(args.initial_equity)))
     elif args.command == "paper":
-        return PaperEngine(state_store)
+        return PaperEngine(state_store, initial_equity=Decimal("10000"))
     elif args.command == "live":
         return LiveEngine(
             exchange_id=config.exchange.exchange,
@@ -114,6 +115,7 @@ def _build_orchestrator(args, strategy, execution, config, state_store, logger):
 
     if args.command == "backtest":
         from src.orchestrator.backtest import BacktestOrchestrator
+        from src.execution.backtest import BacktestEngine, BacktestResult
         from src.data.loader import load_or_fetch
         import pandas as pd
 
@@ -146,18 +148,109 @@ def _build_orchestrator(args, strategy, execution, config, state_store, logger):
             logger.error(f"Insufficient data: {len(df)} bars < min_bars ({strategy.min_bars})")
             sys.exit(1)
 
-        return BacktestOrchestrator(
-            strategy=strategy,
-            execution=execution,
-            symbols=symbols,
-            risk_config=config.risk,
-            state_store=state_store,
-            circuit_breaker=circuit_breaker,
-            logger=logger,
-            data_df=df,
-            initial_equity=Decimal(str(args.initial_equity)),
-            risk_manager=risk_manager,
-        )
+        # Check for OOS split
+        has_oos = all([args.train_start, args.train_end, args.test_start, args.test_end])
+
+        if has_oos:
+            train_start_ms = date_to_utc_ms(args.train_start)
+            train_end_ms = date_to_utc_ms(args.train_end)
+            test_start_ms = date_to_utc_ms(args.test_start)
+            test_end_ms = date_to_utc_ms(args.test_end)
+
+            train_df = df[(df["timestamp"] >= train_start_ms) & (df["timestamp"] <= train_end_ms)].reset_index(drop=True)
+            test_df = df[(df["timestamp"] >= test_start_ms) & (df["timestamp"] <= test_end_ms)].reset_index(drop=True)
+
+            logger.info(f"OOS: train={len(train_df)} bars, test={len(test_df)} bars")
+
+            initial_equity = Decimal(str(args.initial_equity))
+
+            # Run training
+            train_engine = BacktestEngine(initial_equity=initial_equity)
+            train_orch = BacktestOrchestrator(
+                strategy=strategy, execution=train_engine, symbols=symbols,
+                risk_config=config.risk, state_store=state_store,
+                circuit_breaker=circuit_breaker, logger=logger,
+                data_df=train_df, initial_equity=initial_equity,
+                risk_manager=risk_manager,
+            )
+            train_result = train_orch.run()
+
+            # Run testing (fresh engine, same strategy)
+            test_risk_manager = RiskManager(config.risk, state_store)
+            test_engine = BacktestEngine(initial_equity=initial_equity)
+            test_orch = BacktestOrchestrator(
+                strategy=type(strategy)(strategy.params),  # fresh state
+                execution=test_engine, symbols=symbols,
+                risk_config=config.risk, state_store=state_store,
+                circuit_breaker=CircuitBreaker(config.risk, state_store),
+                logger=logger, data_df=test_df,
+                initial_equity=initial_equity,
+                risk_manager=test_risk_manager,
+            )
+            test_result = test_orch.run()
+
+            # Populate OOS metadata
+            test_result = BacktestResult(
+                initial_equity=test_result.initial_equity,
+                final_equity=test_result.final_equity,
+                equity_curve=test_result.equity_curve,
+                trades=test_result.trades,
+                is_oos=True,
+                train_result=train_result,
+                oos_warning="",
+            )
+
+            # Compute OOS warnings
+            from src.analytics.metrics import calculate_metrics
+            train_metrics = calculate_metrics(train_result, timeframe=args.timeframe, risk_free_rate=config.app.analytics.get("risk_free_rate", 0.02))
+            test_metrics = calculate_metrics(test_result, timeframe=args.timeframe, risk_free_rate=config.app.analytics.get("risk_free_rate", 0.02))
+
+            oos_warnings = []
+            if test_metrics.sharpe_ratio < train_metrics.sharpe_ratio * 0.3:
+                oos_warnings.append(f"样本外衰减严重: test_sharpe={test_metrics.sharpe_ratio:.2f} < train_sharpe={train_metrics.sharpe_ratio:.2f}×0.3")
+            if float(test_metrics.total_return) < 0:
+                oos_warnings.append("样本外测试亏损，建议不实盘")
+            if len(test_result.trades) < 10:
+                oos_warnings.append(f"样本外交易次数不足 ({len(test_result.trades)} < 10)")
+
+            test_result = BacktestResult(
+                initial_equity=test_result.initial_equity,
+                final_equity=test_result.final_equity,
+                equity_curve=test_result.equity_curve,
+                trades=test_result.trades,
+                is_oos=True,
+                train_result=train_result,
+                oos_warning="; ".join(oos_warnings) if oos_warnings else "",
+            )
+
+            # Print side-by-side comparison
+            from src.analytics.report import print_backtest_report
+            logger.info("=" * 60)
+            logger.info("  TRAINING SET RESULTS")
+            logger.info("=" * 60)
+            print_backtest_report(train_metrics, train_result.trades, train_orch.warnings if hasattr(train_orch, 'warnings') else [])
+            logger.info("=" * 60)
+            logger.info("  TEST SET RESULTS (OOS)")
+            logger.info("=" * 60)
+            print_backtest_report(test_metrics, test_result.trades, test_orch.warnings if hasattr(test_orch, 'warnings') else [])
+            if oos_warnings:
+                logger.warning("OOS WARNINGS: " + "; ".join(oos_warnings))
+
+            return test_result
+
+        else:
+            return BacktestOrchestrator(
+                strategy=strategy,
+                execution=execution,
+                symbols=symbols,
+                risk_config=config.risk,
+                state_store=state_store,
+                circuit_breaker=circuit_breaker,
+                logger=logger,
+                data_df=df,
+                initial_equity=Decimal(str(args.initial_equity)),
+                risk_manager=risk_manager,
+            )
 
     elif args.command == "paper":
         from src.orchestrator.paper import PaperOrchestrator
@@ -333,7 +426,8 @@ def main():
 
     # === Phase 3: Build components ===
     try:
-        strategy = get_strategy(config.strategy.active, config.strategy.params)
+        strategy_name = getattr(args, "strategy", None) or config.strategy.active
+        strategy = get_strategy(strategy_name, config.strategy.params)
         execution = _build_execution(args, config, state_store)
         orchestrator = _build_orchestrator(args, strategy, execution, config, state_store, logger)
         orchestrator_ref["instance"] = orchestrator

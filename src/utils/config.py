@@ -26,6 +26,7 @@ class StrategyConfig(BaseModel, frozen=True):
     macd: dict = Field(default_factory=dict)
     rsi: dict = Field(default_factory=dict)
     bollinger: dict = Field(default_factory=dict)
+    fusion: dict = Field(default_factory=dict)
 
     @property
     def params(self) -> dict:

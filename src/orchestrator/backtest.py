@@ -1,8 +1,9 @@
 import time
 from decimal import Decimal
 from datetime import datetime, timezone
+import pandas as pd
 from src.orchestrator.base import BaseOrchestrator
-from src.strategy.base import SignalAction
+from src.strategy.base import Signal, SignalAction
 from src.execution.backtest import BacktestResult
 
 
@@ -81,15 +82,11 @@ class BacktestOrchestrator(BaseOrchestrator):
                         if i + 1 < len(df):
                             execution_price = Decimal(str(df.iloc[i + 1]["open"]))
                             engine.set_last_close(execution_price)
-                        # Create sell signal for SL
-                        sl_signal = type('Signal', (), {
-                            'action': SignalAction.SELL,
-                            'symbol': symbol,
-                            'strength': 1.0,
-                            'price': current_close,
-                            'timestamp': current_timestamp,
-                            'reason': f"Stop loss: {sl_result.stop_price}",
-                        })()
+                        sl_signal = Signal.create_exit(
+                            symbol=symbol, price=current_close,
+                            timestamp=current_timestamp,
+                            reason=f"Stop loss: {sl_result.stop_price}",
+                        )
                         order = engine.execute_signal(sl_signal, engine.get_equity(), position)
                         self.trades.append(order)
                         position = None
@@ -101,14 +98,11 @@ class BacktestOrchestrator(BaseOrchestrator):
                         if i + 1 < len(df):
                             execution_price = Decimal(str(df.iloc[i + 1]["open"]))
                             engine.set_last_close(execution_price)
-                        tp_signal = type('Signal', (), {
-                            'action': SignalAction.SELL,
-                            'symbol': symbol,
-                            'strength': 1.0,
-                            'price': current_close,
-                            'timestamp': current_timestamp,
-                            'reason': f"Take profit: {tp_result.tp_price}",
-                        })()
+                        tp_signal = Signal.create_exit(
+                            symbol=symbol, price=current_close,
+                            timestamp=current_timestamp,
+                            reason=f"Take profit: {tp_result.tp_price}",
+                        )
                         order = engine.execute_signal(tp_signal, engine.get_equity(), position)
                         self.trades.append(order)
                         position = None
@@ -126,14 +120,24 @@ class BacktestOrchestrator(BaseOrchestrator):
                         execution_price = Decimal(str(df.iloc[i + 1]["open"]))
                         engine.set_last_close(execution_price)
 
-                        # Risk check
+                        # Risk check + position sizing
+                        equity = engine.get_equity()
                         if self.risk_manager:
-                            if not self.risk_manager.check_signal(signal, engine.get_equity(), None):
-                                self.logger.info(f"Signal rejected by risk manager")
+                            if not self.risk_manager.check_signal(signal, equity, None):
+                                self.logger.info("Signal rejected by risk manager")
                             else:
-                                order = engine.execute_signal(signal, engine.get_equity(), None)
+                                pos_size = self.risk_manager.calculate_position(
+                                    signal, equity, None,
+                                )
+                                order = engine.execute_signal(
+                                    signal, equity, None,
+                                    quantity=pos_size.quantity,
+                                )
                                 self.trades.append(order)
                                 self.risk_manager.record_trade()
+                        else:
+                            order = engine.execute_signal(signal, equity, None)
+                            self.trades.append(order)
                     # else: last bar, discard signal
 
             # === STEP 3: Update equity curve ===

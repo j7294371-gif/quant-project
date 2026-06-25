@@ -68,7 +68,7 @@ def print_backtest_report(metrics, trades, warnings: list[str] | None = None):
     # Warnings panel
     if warnings:
         console.print()
-        warning_text = "\n".join(f"⚠ {w}" for w in warnings)
+        warning_text = "\n".join(f"[WARNING] {w}" for w in warnings)
         console.print(Panel(warning_text, title="Warnings", border_style="yellow"))
 
     console.print()

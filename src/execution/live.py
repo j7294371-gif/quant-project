@@ -29,53 +29,66 @@ class LiveEngine(ExecutionEngine):
     def trades(self) -> list[Order]:
         return list(self._trades)
 
-    def execute_signal(self, signal, equity: Decimal, position: Position | None) -> Order:
-        """Real order via CCXT with retry and polling."""
-        # 1. Position sync check
+    def execute_signal(self, signal, equity: Decimal, position: Position | None,
+                       quantity: Decimal | None = None) -> Order:
+        """Real order via CCXT. quantity from RiskManager (required for live)."""
+        # Position sync check
         exchange_pos = self.get_current_position(signal.symbol)
         if (position is None) != (exchange_pos is None):
             raise PositionMismatchError(
-                f"Position mismatch for {signal.symbol}: local={position is not None}, exchange={exchange_pos is not None}"
+                f"Position mismatch for {signal.symbol}: "
+                f"local={position is not None}, exchange={exchange_pos is not None}"
             )
+
+        if quantity is None:
+            logger.error("LiveEngine requires quantity from RiskManager, got None")
+            return Order.create_pending(signal.symbol, signal.action.value, Decimal("0"),
+                                        signal.price, signal.timestamp, "missing quantity"
+                                        ).with_status(OrderStatus.REJECTED)
 
         try:
             if signal.action.value == "buy":
-                return self._place_order(signal, "buy")
+                return self._place_order(signal, "buy", quantity)
             elif signal.action.value == "sell":
-                return self._place_order(signal, "sell")
+                return self._place_order(signal, "sell", quantity)
             else:
-                return Order.create_pending(signal.symbol, "hold", Decimal("0"), signal.price, signal.timestamp, "hold")
+                return Order.create_pending(signal.symbol, "hold", Decimal("0"),
+                                            signal.price, signal.timestamp, "hold")
         except ccxt.AuthenticationError as e:
             logger.critical(f"Authentication failed: {e}")
             self.cancel_all_orders()
             sys.exit(1)
         except ccxt.InsufficientFunds as e:
             logger.error(f"Insufficient funds for {signal.symbol}: {e}")
-            return Order.create_pending(signal.symbol, signal.action.value, Decimal("0"), signal.price, signal.timestamp, f"rejected: {e}").with_status(OrderStatus.REJECTED)
+            return Order.create_pending(
+                signal.symbol, signal.action.value, quantity, signal.price,
+                signal.timestamp, f"rejected: {e}"
+            ).with_status(OrderStatus.REJECTED)
         except (ccxt.NetworkError, ccxt.RequestTimeout) as e:
             logger.warning(f"Network error, retrying: {e}")
             time.sleep(2)
-            return self._place_order(signal, signal.action.value)  # Retry once
+            return self._place_order(signal, signal.action.value, quantity)
 
-    def _place_order(self, signal, side: str) -> Order:
-        """Place market order and poll for fill."""
-        # Calculate quantity (simplified - use signal info)
-        qty = Decimal("0.001")  # Placeholder; real calculation from signal context
-
-        # Create order
+    def _place_order(self, signal, side: str, quantity: Decimal) -> Order:
+        """Place market order and poll for fill (2s interval, 30s timeout)."""
         try:
-            exchange_order = self.exchange.create_market_buy_order(
-                signal.symbol, float(qty)
-            ) if side == "buy" else self.exchange.create_market_sell_order(
-                signal.symbol, float(qty)
-            )
+            if side == "buy":
+                exchange_order = self.exchange.create_market_buy_order(
+                    signal.symbol, float(quantity)
+                )
+            else:
+                exchange_order = self.exchange.create_market_sell_order(
+                    signal.symbol, float(quantity)
+                )
         except Exception as e:
             logger.error(f"Order creation failed: {e}")
-            return Order.create_pending(signal.symbol, side, qty, signal.price, signal.timestamp, signal.reason).with_status(OrderStatus.REJECTED)
+            return Order.create_pending(
+                signal.symbol, side, quantity, signal.price,
+                signal.timestamp, signal.reason
+            ).with_status(OrderStatus.REJECTED)
 
-        # Poll for fill (2s interval, 30s timeout)
         order_id = exchange_order.get("id", "")
-        for _ in range(15):
+        for _ in range(15):  # 30s timeout at 2s intervals
             time.sleep(2)
             try:
                 status = self.exchange.fetch_order(order_id, signal.symbol)
@@ -86,18 +99,11 @@ class LiveEngine(ExecutionEngine):
                     fee = Decimal(str(fee_info.get("cost", 0))) if fee_info else Decimal("0")
 
                     order = Order(
-                        id=order_id,
-                        symbol=signal.symbol,
-                        side=side,
-                        type=OrderType.MARKET,
-                        quantity=qty,
-                        price=signal.price,
-                        status=OrderStatus.FILLED,
-                        filled_quantity=filled,
-                        filled_price=price,
-                        fee=fee,
-                        timestamp=signal.timestamp,
-                        reason=signal.reason,
+                        id=order_id, symbol=signal.symbol, side=side,
+                        type=OrderType.MARKET, quantity=quantity, price=signal.price,
+                        status=OrderStatus.FILLED, filled_quantity=filled,
+                        filled_price=price, fee=fee,
+                        timestamp=signal.timestamp, reason=signal.reason,
                     )
                     self._trades.append(order)
                     logger.info(f"Live {side.upper()}: {signal.symbol} qty={filled} @ {price}")
@@ -105,13 +111,15 @@ class LiveEngine(ExecutionEngine):
             except Exception:
                 continue
 
-        # Timeout - cancel
         logger.error(f"Order {order_id} timed out, cancelling")
         try:
             self.exchange.cancel_order(order_id, signal.symbol)
         except Exception:
             pass
-        return Order.create_pending(signal.symbol, side, qty, signal.price, signal.timestamp, signal.reason).with_status(OrderStatus.CANCELLED)
+        return Order.create_pending(
+            signal.symbol, side, quantity, signal.price,
+            signal.timestamp, signal.reason
+        ).with_status(OrderStatus.CANCELLED)
 
     def close_all_positions(self, reason: str) -> list[Order]:
         orders = []
@@ -123,8 +131,10 @@ class LiveEngine(ExecutionEngine):
                     symbol = pos["symbol"]
                     try:
                         self.exchange.create_market_sell_order(symbol, float(qty))
-                        order = Order.create_pending(symbol, "sell", qty, None, int(time.time() * 1000), reason)
-                        orders.append(order)
+                        orders.append(Order.create_pending(
+                            symbol, "sell", qty, None,
+                            int(time.time() * 1000), reason,
+                        ))
                     except Exception as e:
                         logger.error(f"Failed to close {symbol}: {e}")
         except Exception as e:
@@ -146,9 +156,8 @@ class LiveEngine(ExecutionEngine):
             if float(free) <= 0:
                 return None
             return Position(
-                symbol=symbol,
-                quantity=Decimal(str(free)),
-                entry_price=Decimal("0"),  # Real entry price from exchange unavailable via simple balance
+                symbol=symbol, quantity=Decimal(str(free)),
+                entry_price=Decimal("0"),
                 timestamp=int(time.time() * 1000),
             )
         except Exception as e:
@@ -158,7 +167,8 @@ class LiveEngine(ExecutionEngine):
     def get_equity(self) -> Decimal:
         try:
             balance = self.exchange.fetch_balance()
-            return Decimal(str(balance.get("total", {}).get("USDT", balance.get("free", {}).get("USDT", 0))))
+            return Decimal(str(balance.get("total", {}).get("USDT",
+                           balance.get("free", {}).get("USDT", 0))))
         except Exception as e:
             logger.error(f"Failed to fetch equity: {e}")
             return Decimal("0")
