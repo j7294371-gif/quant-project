@@ -220,6 +220,64 @@ class TestScoringModel:
         # Expected: (25*0.25 + 25*0.25 + 25*0.15 + 25*0.10) / 0.75 * 4 = (18.75)/0.75*4 = 100
         assert abs(total - 100.0) < 0.01
 
+    def test_single_factor_no_veto_with_floor(self):
+        """With only 1 factor (w=0.25), normalization floor=0.6 prevents veto.
+
+        Without the floor, a single -21 sentiment factor would amplify to -84.
+        With floor=0.6: (-21*0.25)/0.6*4 = -35 — safe in warning zone.
+        """
+        config = make_mock_config()
+        validator = AdversarialValidator(config)
+        factors = [
+            AdversarialFactor("sentiment", -21.0, 0.25, "FG=71", "cached", available=True),
+            AdversarialFactor("funding", 0.0, 0.20, "backtest", "backtest_neutral", available=False),
+            AdversarialFactor("long_short", 0.0, 0.15, "backtest", "backtest_neutral", available=False),
+            AdversarialFactor("mtf", 0.0, 0.25, "insufficient data", "unavailable", available=False),
+            AdversarialFactor("volatility", 0.0, 0.15, "insufficient data", "unavailable", available=False),
+        ]
+        total = validator._compute_total(factors)
+        # Expected: (-21 * 0.25) / 0.6 * 4 = -5.25 / 0.6 * 4 = -35.0
+        assert abs(total - (-35.0)) < 0.5, f"Expected ≈-35.0, got {total}"
+        # Without floor this would be -84 — verify it's NOT amplified that far
+        assert total > -40.0, f"Floor should prevent single-factor rejection, got {total}"
+
+    def test_two_factors_with_floor_applies(self):
+        """With 2 factors (total weight=0.50 < 0.60), floor=0.60 still applies."""
+        config = make_mock_config()
+        validator = AdversarialValidator(config)
+        factors = [
+            AdversarialFactor("sentiment", -15.0, 0.25, "ok", "cached", available=True),
+            AdversarialFactor("funding", 0.0, 0.20, "backtest", "backtest_neutral", available=False),
+            AdversarialFactor("long_short", 0.0, 0.15, "backtest", "backtest_neutral", available=False),
+            AdversarialFactor("mtf", +10.0, 0.25, "ok", "cached", available=True),
+            AdversarialFactor("volatility", 0.0, 0.15, "insufficient", "unavailable", available=False),
+        ]
+        total = validator._compute_total(factors)
+        # Available weights: 0.25 + 0.25 = 0.50 → floor = max(0.6, 0.50) = 0.60
+        # Weighted sum: (-15 * 0.25) + (10 * 0.25) = -3.75 + 2.5 = -1.25
+        # effective = max(0.6, 0.50) = 0.60
+        # Normalized: -1.25 / 0.60 * 4 = -8.33
+        assert abs(total - (-8.33)) < 1.0, f"Expected ≈-8.33, got {total}"
+        assert total >= -20.0  # Should pass cleanly with two mixed factors
+
+    def test_three_factors_above_floor_no_cap(self):
+        """With 3+ factors (total weight > 0.50), floor doesn't apply."""
+        config = make_mock_config()
+        validator = AdversarialValidator(config)
+        factors = [
+            AdversarialFactor("sentiment", -21.0, 0.25, "ok", "cached", available=True),
+            AdversarialFactor("funding", 0.0, 0.20, "backtest", "backtest_neutral", available=False),
+            AdversarialFactor("long_short", 0.0, 0.15, "backtest", "backtest_neutral", available=False),
+            AdversarialFactor("mtf", +10.0, 0.25, "ok", "cached", available=True),
+            AdversarialFactor("volatility", -5.0, 0.15, "ok", "cached", available=True),
+        ]
+        total = validator._compute_total(factors)
+        # Available weights: 0.25 + 0.25 + 0.15 = 0.65 → floor = 0.65 (above floor)
+        # Weighted sum: (-21 * 0.25) + (10 * 0.25) + (-5 * 0.15) = -5.25 + 2.5 + (-0.75) = -3.5
+        # Normalized: -3.5 / 0.65 * 4 = -21.54
+        assert abs(total - (-21.54)) < 1.0, f"Expected ≈-21.54, got {total}"
+        assert total > -25.0  # Should be in warning zone, not reject
+
     def test_all_unavailable_returns_zero(self):
         """When nothing is available, total_score = 0."""
         config = make_mock_config()

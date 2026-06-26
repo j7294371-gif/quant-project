@@ -184,20 +184,27 @@ class AdversarialValidator:
         When factors are unavailable, their weight is redistributed among
         available factors so the total still reflects genuine signal quality.
         Score normalized from weighted sum in [-25, +25] to [-100, +100].
+
+        CRITICAL: uses an effective weight floor of 0.6 to prevent
+        single-factor amplification. With only one 25%-weight factor
+        available, the worst score is -41.7 (barely rejectable), and
+        a typical -21 sentiment score gives -35 (warning zone).
+        This upholds "no single-factor veto" in lenient mode.
         """
         available = [f for f in factors if f.available]
         if not available:
             return 0.0
 
-        # Sum of weights among available factors (for normalization)
         total_avail_weight = sum(f.weight for f in available)
         if total_avail_weight <= 0:
             return 0.0
 
         weighted_sum = sum(f.score * f.weight for f in available)
-        # Normalize: if all factors present, weighted_sum ∈ [-25, +25]
-        # Scale by 4 to map to [-100, +100]
-        normalized = (weighted_sum / total_avail_weight) * 4.0
+        # Floor at 0.6 prevents single-factor amplification:
+        #   e.g. only sentiment (w=0.25) at -25 → (-25*0.25)/0.6*4 = -41.7
+        #        only sentiment (w=0.25) at -21 → (-21*0.25)/0.6*4 = -35.0 (warning)
+        effective_weight = max(0.6, total_avail_weight)
+        normalized = (weighted_sum / effective_weight) * 4.0
         return float(max(-100.0, min(100.0, normalized)))
 
     # ------------------------------------------------------------------
@@ -491,8 +498,10 @@ class AdversarialValidator:
                     score = 15.0
                     desc = f"Both timeframes aligned BUY on {higher_tf}"
                 else:
-                    score = 0.0
-                    desc = f"{higher_tf} HOLD (neutral)"
+                    # HOLD on higher TF → fall back to trend direction
+                    score, desc = self._mtf_trend_fallback(
+                        resampled, signal, higher_tf,
+                    )
             elif signal.action == SignalAction.SELL:
                 if mtf_signal.action == SignalAction.BUY:
                     score = -25.0
@@ -501,8 +510,10 @@ class AdversarialValidator:
                     score = 15.0
                     desc = f"Both timeframes aligned SELL on {higher_tf}"
                 else:
-                    score = 0.0
-                    desc = f"{higher_tf} HOLD (neutral)"
+                    # HOLD on higher TF → fall back to trend direction
+                    score, desc = self._mtf_trend_fallback(
+                        resampled, signal, higher_tf,
+                    )
             else:
                 score = 0.0
                 desc = "HOLD signal, no MTF check needed"
@@ -524,6 +535,42 @@ class AdversarialValidator:
                 data_freshness="error",
                 available=False,
             )
+
+    def _mtf_trend_fallback(self, resampled_df, signal, higher_tf: str) -> tuple[float, str]:
+        """Fallback: when higher-TF strategy returns HOLD, check simple trend direction.
+
+        Uses price vs SMA-20 on the higher timeframe as a directional bias.
+        - BUY signal + higher TF uptrend → +10 (mild confirmation)
+        - BUY signal + higher TF downtrend → -20 (mild contradiction)
+        (Inverted for SELL signals.)
+        """
+        try:
+            close = resampled_df["close"].astype(float)
+            if len(close) < 21:
+                return 0.0, f"{higher_tf} HOLD (insufficient data for trend fallback)"
+
+            sma20 = close.rolling(20).mean()
+            last_close = close.iloc[-1]
+            last_sma20 = sma20.iloc[-1]
+
+            if pd.isna(last_sma20):
+                return 0.0, f"{higher_tf} HOLD (SMA20 NaN)"
+
+            is_uptrend = last_close > last_sma20
+
+            if signal.action == SignalAction.BUY:
+                if is_uptrend:
+                    return 10.0, f"{higher_tf} uptrend supports BUY (close={last_close:.1f} > SMA20={last_sma20:.1f})"
+                else:
+                    return -20.0, f"{higher_tf} downtrend vs BUY (close={last_close:.1f} < SMA20={last_sma20:.1f})"
+            else:
+                if not is_uptrend:
+                    return 10.0, f"{higher_tf} downtrend supports SELL (close={last_close:.1f} < SMA20={last_sma20:.1f})"
+                else:
+                    return -20.0, f"{higher_tf} uptrend vs SELL (close={last_close:.1f} > SMA20={last_sma20:.1f})"
+        except Exception as e:
+            logger.warning(f"MTF trend fallback failed: {e}")
+            return 0.0, f"{higher_tf} HOLD (trend fallback error: {e})"
 
     # ------------------------------------------------------------------
     # Factor 5: Volatility regime check (ATR-based)
