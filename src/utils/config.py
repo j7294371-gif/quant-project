@@ -54,6 +54,36 @@ class PortfolioSubConfig(BaseModel, frozen=True):
     correlation_extreme: Decimal = Decimal("0.95")
 
 
+class AdversarialConfig(BaseModel, frozen=True):
+    """Adversarial pre-trade validation configuration (宽松模式 / lenient)."""
+    enabled: bool = True
+    reject_threshold: float = -40.0
+    warning_threshold: float = -20.0
+    sentiment_weight: float = 0.25
+    funding_weight: float = 0.20
+    long_short_weight: float = 0.15
+    mtf_weight: float = 0.25
+    volatility_weight: float = 0.15
+    mtf_higher_timeframe: str = "4h"
+
+    @model_validator(mode="after")
+    def validate_weights(self):
+        total = (
+            self.sentiment_weight
+            + self.funding_weight
+            + self.long_short_weight
+            + self.mtf_weight
+            + self.volatility_weight
+        )
+        if abs(total - 1.0) > 0.001:
+            raise ValueError(f"Adversarial weights must sum to 1.0, got {total}")
+        if not (-100 <= self.reject_threshold <= 0):
+            raise ValueError(f"reject_threshold must be in [-100, 0], got {self.reject_threshold}")
+        if self.warning_threshold <= self.reject_threshold:
+            raise ValueError("warning_threshold must be > reject_threshold")
+        return self
+
+
 class RiskConfig(BaseModel, frozen=True):
     max_position_pct: Decimal = Decimal("0.2")
     max_drawdown_limit: Decimal = Decimal("0.3")
@@ -92,6 +122,7 @@ class AppConfig(BaseModel, frozen=True):
     app: AppYamlConfig
     strategy: StrategyConfig
     risk: RiskConfig
+    adversarial: AdversarialConfig = Field(default_factory=AdversarialConfig)
     exchange: ExchangeConfig
     api_key: str = ""
     api_secret: str = ""
@@ -106,11 +137,13 @@ class AppConfig(BaseModel, frozen=True):
             print(f"错误: 配置目录不存在: {config_dir}", file=sys.stderr)
             sys.exit(1)
 
-        def _read_yaml(filename: str) -> dict:
+        def _read_yaml(filename: str, required: bool = True) -> dict:
             filepath = config_path / filename
             if not filepath.exists():
-                print(f"错误: 配置文件缺失: {filepath}", file=sys.stderr)
-                sys.exit(1)
+                if required:
+                    print(f"错误: 配置文件缺失: {filepath}", file=sys.stderr)
+                    sys.exit(1)
+                return None
             try:
                 with open(filepath, "r", encoding="utf-8") as f:
                     return yaml.safe_load(f) or {}
@@ -123,6 +156,9 @@ class AppConfig(BaseModel, frozen=True):
             app_yaml = AppYamlConfig(**_read_yaml("app.yaml"))
             strategy_yaml = StrategyConfig(**_read_yaml("strategy.yaml"))
             risk_yaml = RiskConfig(**_read_yaml("risk.yaml"))
+            # adversarial.yaml is optional — use defaults if missing
+            adv_data = _read_yaml("adversarial.yaml", required=False)
+            adversarial_yaml = AdversarialConfig(**adv_data) if adv_data is not None else AdversarialConfig()
             exchange_yaml = ExchangeConfig(**_read_yaml("exchange.yaml"))
 
             # 6. Read env vars
@@ -134,6 +170,7 @@ class AppConfig(BaseModel, frozen=True):
                 app=app_yaml,
                 strategy=strategy_yaml,
                 risk=risk_yaml,
+                adversarial=adversarial_yaml,
                 exchange=exchange_yaml,
                 api_key=api_key,
                 api_secret=api_secret,

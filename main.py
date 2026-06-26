@@ -106,7 +106,24 @@ def _build_orchestrator(args, strategy, execution, config, state_store, logger):
     from src.risk.manager import RiskManager
     from src.risk.circuit import CircuitBreaker
 
-    risk_manager = RiskManager(config.risk, state_store)
+    # Build CCXT exchange instance for live/paper adversarial checks
+    exchange_instance = None
+    if args.command in ("paper", "live"):
+        import ccxt
+        try:
+            exchange_instance = getattr(ccxt, config.exchange.exchange)({
+                "enableRateLimit": True,
+                "timeout": 30000,
+            })
+        except Exception as e:
+            logger.warning(f"无法创建交易所实例用于反向验证: {e}")
+
+    risk_manager = RiskManager(
+        config.risk, state_store,
+        adversarial_config=config.adversarial,
+        strategy=strategy,
+        exchange=exchange_instance,
+    )
     circuit_breaker = risk_manager.circuit_breaker
 
     symbols = [args.symbol] if args.command == "backtest" else (
@@ -175,11 +192,16 @@ def _build_orchestrator(args, strategy, execution, config, state_store, logger):
             )
             train_result = train_orch.run()
 
-            # Run testing (fresh engine, same strategy)
-            test_risk_manager = RiskManager(config.risk, state_store)
+            # Run testing (fresh engine, same strategy type, fresh state)
+            test_strategy = type(strategy)(strategy.params)
+            test_risk_manager = RiskManager(
+                config.risk, state_store,
+                adversarial_config=config.adversarial,
+                strategy=test_strategy,
+            )
             test_engine = BacktestEngine(initial_equity=initial_equity)
             test_orch = BacktestOrchestrator(
-                strategy=type(strategy)(strategy.params),  # fresh state
+                strategy=test_strategy,  # fresh state (same instance as adversarial)
                 execution=test_engine, symbols=symbols,
                 risk_config=config.risk, state_store=state_store,
                 circuit_breaker=CircuitBreaker(config.risk, state_store),

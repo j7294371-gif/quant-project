@@ -11,7 +11,8 @@ from src.risk.circuit import CircuitBreaker
 
 
 class RiskManager:
-    def __init__(self, config, state_store):
+    def __init__(self, config, state_store, adversarial_config=None,
+                 strategy=None, exchange=None):
         self.config = config
         self.position_config = {
             "max_position_pct": str(config.max_position_pct),
@@ -32,6 +33,17 @@ class RiskManager:
         self.circuit_breaker = CircuitBreaker(config, state_store)
         self.daily_trade_count = 0
         self.max_daily_trades = 50
+
+        # Adversarial pre-trade validator (lenient mode)
+        self.adversarial = None
+        if adversarial_config and adversarial_config.enabled:
+            from src.risk.adversarial import AdversarialValidator
+            self.adversarial = AdversarialValidator(
+                config=adversarial_config,
+                strategy=strategy,
+                exchange=exchange,
+                cache_dir="./data",
+            )
 
     def check_signal(
         self, signal, equity: Decimal, position: dict | None
@@ -59,6 +71,47 @@ class RiskManager:
             return False
 
         return True
+
+    def check_adversarial(self, signal, ohlcv_df=None) -> tuple[bool, str, Decimal]:
+        """Run adversarial pre-trade validation after risk gates pass.
+
+        Returns (passed, reason, position_multiplier).
+            position_multiplier: Decimal("1.0") = normal,
+                                 Decimal("0.5") = warning (halve position),
+                                 Decimal("0.0") = rejected.
+
+        Only applicable to BUY signals. SELL signals are exits and skip this check.
+        If adversarial is disabled or not configured, returns pass-through.
+        """
+        # Skip for non-BUY signals (SELL = exit, HOLD = nothing)
+        if signal.action.value != "buy":
+            return True, "", Decimal("1.0")
+
+        if self.adversarial is None:
+            return True, "", Decimal("1.0")
+
+        result = self.adversarial.validate(signal, ohlcv_df)
+
+        if not result.passed:
+            logger.warning(
+                f"[{signal.symbol}] ADVERSARIAL REJECT — "
+                f"score={result.total_score:.1f} | {result.reason_summary}"
+            )
+            return False, result.reason_summary, Decimal("0.0")
+
+        if result.warning:
+            logger.info(
+                f"[{signal.symbol}] ADVERSARIAL WARNING — "
+                f"score={result.total_score:.1f} (position halved) | "
+                f"{result.reason_summary}"
+            )
+            return True, result.reason_summary, Decimal("0.5")
+
+        logger.debug(
+            f"[{signal.symbol}] ADVERSARIAL PASS — "
+            f"score={result.total_score:.1f} | {result.reason_summary}"
+        )
+        return True, result.reason_summary, Decimal("1.0")
 
     def calculate_position(
         self, signal, equity: Decimal, stop_loss_price: Decimal | None

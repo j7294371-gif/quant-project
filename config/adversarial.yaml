@@ -1,0 +1,27 @@
+# Adversarial Pre-Trade Validation Configuration
+# After strategy generates BUY signal and risk check passes, the adversarial
+# validator searches for opposing information across 5 dimensions. Only when
+# the combined weighted score is above the reject threshold does the trade proceed.
+#
+# Scoring model (lenient / 宽松模式):
+#   Each factor: -25 (opposes trade) to +25 (supports trade), 0 = neutral
+#   Total = weighted sum normalized to -100..+100
+#   total < reject_threshold  → REJECT signal
+#   reject_threshold <= total < warning_threshold → WARNING (position halved)
+#   total >= warning_threshold → PASS (normal)
+
+enabled: true
+
+# Thresholds (normalized to -100..+100 range)
+reject_threshold: -40        # Below this: reject signal entirely
+warning_threshold: -20       # Below this (but >= reject): halve position
+
+# Factor weights (must sum to 1.0)
+sentiment_weight: 0.25       # Fear & Greed Index contrarian mapping
+funding_weight: 0.20         # Funding rate overheat detection
+long_short_weight: 0.15      # Long/short ratio crowding
+mtf_weight: 0.25             # Multi-timeframe contradiction (MOST IMPORTANT)
+volatility_weight: 0.15      # ATR volatility spike detection
+
+# Multi-timeframe settings
+mtf_higher_timeframe: "4h"   # Higher timeframe to compare against

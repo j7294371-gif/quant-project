@@ -124,12 +124,35 @@ class PaperOrchestrator(BaseOrchestrator):
                     self.realized_pnl += pnl
                 return
 
-            # BUY signals: risk check + position sizing
+            # BUY signals: risk check + adversarial validation + position sizing
             if self.risk_manager:
                 if not self.risk_manager.check_signal(signal, equity, position):
                     return
 
+                # === Adversarial pre-trade validation ===
+                adv_passed, adv_reason, adv_multiplier = \
+                    self.risk_manager.check_adversarial(signal, ohlcv_df=df)
+
+                if not adv_passed:
+                    self.logger.info(
+                        f"Signal rejected by adversarial validator: {adv_reason}"
+                    )
+                    self.warnings.append(f"Adversarial reject: {adv_reason}")
+                    return
+
                 pos_size = self.risk_manager.calculate_position(signal, equity, None)
+                # Apply position multiplier from adversarial warning
+                if adv_multiplier < Decimal("1.0"):
+                    from src.risk.position import PositionSize
+                    pos_size = PositionSize(
+                        quantity=pos_size.quantity * adv_multiplier,
+                        notional=pos_size.notional * adv_multiplier,
+                        pct_of_equity=pos_size.pct_of_equity * adv_multiplier,
+                    )
+                    self.logger.info(
+                        f"Position halved due to adversarial warning: "
+                        f"qty={pos_size.quantity:.6f}"
+                    )
                 order = self.execution.execute_signal(
                     signal, equity, position, quantity=pos_size.quantity,
                 )

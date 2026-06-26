@@ -120,21 +120,48 @@ class BacktestOrchestrator(BaseOrchestrator):
                         execution_price = Decimal(str(df.iloc[i + 1]["open"]))
                         engine.set_last_close(execution_price)
 
-                        # Risk check + position sizing
+                        # Risk check + adversarial validation + position sizing
                         equity = engine.get_equity()
                         if self.risk_manager:
                             if not self.risk_manager.check_signal(signal, equity, None):
                                 self.logger.info("Signal rejected by risk manager")
                             else:
-                                pos_size = self.risk_manager.calculate_position(
-                                    signal, equity, None,
-                                )
-                                order = engine.execute_signal(
-                                    signal, equity, None,
-                                    quantity=pos_size.quantity,
-                                )
-                                self.trades.append(order)
-                                self.risk_manager.record_trade()
+                                # === Adversarial pre-trade validation ===
+                                adv_passed, adv_reason, adv_multiplier = \
+                                    self.risk_manager.check_adversarial(
+                                        signal, ohlcv_df=window,
+                                    )
+
+                                if not adv_passed:
+                                    self.logger.info(
+                                        f"Signal rejected by adversarial validator: "
+                                        f"{adv_reason}"
+                                    )
+                                    self.warnings.append(
+                                        f"Adversarial reject: {adv_reason}"
+                                    )
+                                else:
+                                    pos_size = self.risk_manager.calculate_position(
+                                        signal, equity, None,
+                                    )
+                                    # Apply position multiplier from adv warning
+                                    if adv_multiplier < Decimal("1.0"):
+                                        from src.risk.position import PositionSize
+                                        pos_size = PositionSize(
+                                            quantity=pos_size.quantity * adv_multiplier,
+                                            notional=pos_size.notional * adv_multiplier,
+                                            pct_of_equity=pos_size.pct_of_equity * adv_multiplier,
+                                        )
+                                        self.logger.info(
+                                            f"Position halved due to adversarial "
+                                            f"warning: qty={pos_size.quantity:.6f}"
+                                        )
+                                    order = engine.execute_signal(
+                                        signal, equity, None,
+                                        quantity=pos_size.quantity,
+                                    )
+                                    self.trades.append(order)
+                                    self.risk_manager.record_trade()
                         else:
                             order = engine.execute_signal(signal, equity, None)
                             self.trades.append(order)
